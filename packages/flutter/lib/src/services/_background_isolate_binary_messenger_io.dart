@@ -15,6 +15,7 @@ class BackgroundIsolateBinaryMessenger extends BinaryMessenger {
   BackgroundIsolateBinaryMessenger._();
 
   final ReceivePort _receivePort = ReceivePort();
+  final ReceivePort _listenPort = ReceivePort();
   final Map<int, Completer<ByteData?>> _completers =
       <int, Completer<ByteData?>>{};
   int _messageCount = 0;
@@ -46,6 +47,23 @@ class BackgroundIsolateBinaryMessenger extends BinaryMessenger {
       final BackgroundIsolateBinaryMessenger portBinaryMessenger =
           BackgroundIsolateBinaryMessenger._();
       _instance = portBinaryMessenger;
+
+      // Setup the ReceivePort that will persistently listen to incoming
+      // platfrom messages
+      portBinaryMessenger._listenPort.listen((dynamic message) {
+        // Handle messages sent from the platform isolate to the current
+        // background isolate
+        final List<dynamic> args = message as List<dynamic>;
+        final int responseId = args[0] as int; // 1st element is always the response id
+        final String channel = args[1] as String; // 2nd element is the channel name
+        final Uint8List bytes = args[2] as Uint8List;
+        final ByteData byteData = ByteData.sublistView(bytes);
+
+        ui.PlatformDispatcher.instance.dispachPlatformMessageFromIsolate(
+            channel,
+            byteData,
+            responseId);
+      });
       portBinaryMessenger._receivePort.listen((dynamic message) {
         try {
           final List<dynamic> args = message as List<dynamic>;
@@ -66,6 +84,14 @@ class BackgroundIsolateBinaryMessenger extends BinaryMessenger {
         }
       });
     }
+  }
+
+  void registerIsolateCallback(String channnel) {
+    ui.PlatformDispatcher.instance.addPlatformPortCallback(channnel, _listenPort.sendPort);
+  }
+
+  void removeIsolateCallback(String channel) {
+    ui.PlatformDispatcher.instance.removePlatformPortCallback(channel);
   }
 
   @override
@@ -91,7 +117,38 @@ class BackgroundIsolateBinaryMessenger extends BinaryMessenger {
 
   @override
   void setMessageHandler(String channel, MessageHandler? handler) {
-    throw UnsupportedError(
-        'Background isolates do not support setMessageHandler(). Messages from the host platform always go to the root isolate.');
+
+    if (ui.channelBuffers == null) {
+      throw Error("ui.channelBuffers is null");
+    }
+    try {
+      if (handler == null) {
+        ui.channelBuffers.clearListener(channel);
+      } else {
+        ui.channelBuffers.setListener(channel, (ByteData? data,
+            ui.PlatformMessageResponseCallback callback) async {
+          ByteData? response;
+          try {
+            response = await handler(data);
+          } catch (exception, stack) {
+            FlutterError.reportError(FlutterErrorDetails(
+              exception: exception,
+              stack: stack,
+              library: 'services library',
+              context: ErrorDescription('during a platform message callback'),
+            ));
+          } finally {
+            callback(response);
+          }
+        });
+      }
+    } catch (exception, stack) {
+      FlutterError.reportError(FlutterErrorDetails(
+        exception: exception,
+        stack: stack,
+        library: 'services library',
+        context: ErrorDescription('during a platform message callback'),
+      ));
+    }
   }
 }
